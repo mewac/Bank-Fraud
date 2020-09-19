@@ -1,0 +1,162 @@
+library(plyr)
+library(tidyverse)
+library(caret)
+library(GGally)
+library(stringr)
+library(rattle)
+library(pROC)
+library(ROCR)
+library(e1071)
+set.seed(317)
+
+#Pre proccessing
+fraud_df <- df %>%
+  mutate(name_Orig_first = str_sub(nameOrig,1,1)) %>%
+  mutate(name_Dest_first = str_sub(nameDest,1,1)) %>%
+  select(-nameOrig, -nameDest)
+
+unique(fraud_df$name_Dest_first)
+
+fraud_df$name_Dest_first <- as.factor(fraud_df$name_Dest_first)
+table(fraud_df$name_Dest_first)
+
+unique(fraud_df$name_Orig_first)
+
+fraud_df2 <- fraud_df %>%
+  select(-name_Orig_first, -isFlaggedFraud) %>%
+  select(isFraud, type, step, everything())
+
+glimpse(fraud_df2)
+
+fraud_df2$isFraud <- as.factor(fraud_df2$isFraud)
+fraud_df2$type <- as.factor(fraud_df2$type)
+
+fraud_df2$isFraud <- recode_factor(fraud_df2$isFraud, `0` = "No", `1` = "Yes")
+
+summary(fraud_df2)
+
+fraud_trans <- fraud_df2 %>%
+  filter(isFraud == "Yes") 
+
+summary(fraud_trans)
+
+fraud_df3 <- fraud_df2 %>%
+  filter(type %in% c("CASH_OUT", "TRANSFER")) %>%
+  filter(name_Dest_first == "C") %>%
+  filter(amount <= 10000000) %>%
+  select(-name_Dest_first)
+summary(fraud_df3)
+
+not_fraud <- fraud_df3 %>%
+  filter(isFraud == "No") %>%
+  sample_n(8213)
+
+is_fraud <- fraud_df3 %>%
+  filter(isFraud == "Yes")
+
+full_sample <- rbind(not_fraud, is_fraud) %>%
+ 
+ggplot(full_sample, aes(x = step, col = isFraud)) +
+  geom_histogram(bins = 743)
+
+ggplot(is_fraud, aes(x = step)) +
+  geom_histogram(bins = 743)
+
+ggpairs(full_sample)
+
+ggplot(full_sample, aes(type, amount, color = isFraud)) +
+  geom_point(alpha = 0.01) +
+  geom_jitter()
+
+cor <- cor(full_sample)
+
+summary(full_sample)
+
+high_cor_cols <- findCorrelation(cor(fraud_numeric), cutoff = .75, verbose = TRUE, 
+                                 names = TRUE, exact = TRUE) 
+
+high_cor_removed <- fraud_pp_w_result %>%
+  select(-newbalanceDest)
+
+fraud_numeric <- high_cor_removed %>%
+  select(-isFraud, -type)
+combiInfo <- findLinearCombos(fraud_numeric)
+combiInfo
+
+model_df <- high_cor_removed
+model_df
+
+is_fraud <- model_df %>%
+  filter(isFraud == 'Yes')
+
+not_fraud <- model_df %>%
+  filter(isFraud == 'No') %>%
+  sample_n(8213)
+model_full_sample <- rbind(is_fraud, not_fraud) %>%
+  arrange(step)
+
+#Building the models
+in_train <- createDataPartition(y = model_full_sample$isFraud, p = .75, list = FALSE)
+train <- model_full_sample[in_train, ]
+test <- model_full_sample[-in_train, ]
+
+gc()
+
+control <- trainControl(method = "repeatedcv", number = 10,
+                        repeats = 3,
+                        classProbs = TRUE,
+                        summaryFunction = twoClassSummary)
+start_time <- Sys.time()
+
+rpart.model <- train(isFraud ~ ., data = train,
+                     method = "rpart",
+                     tuneLength = 10,
+                     metric = "ROC",
+                     trControl = control, parms = list(split = 'information'))
+pred_rpart <- predict(rpart.model, train)
+confusionMatrix(train$isFraud, pred_rpart)
+
+pred_rpart_test <- predict(rpart.model, test)
+confusionMatrix(test$isFraud, pred_rpart_test)
+
+big_no_sample <- model_df %>%
+  filter(isFraud == "No") %>%
+  sample_n(1000000)
+
+rpart_big_no_pred <- predict(rpart.model, big_no_sample)
+confusionMatrix(big_no_sample$isFraud, rpart_big_no_pred)
+
+rpart_probs <- predict(rpart.model, test, type = "prob")
+rpart_roc <- roc(response = test$isFraud,
+                 predictor = rpart_probs$Yes,
+                 levels = levels(test$isFraud))
+plot(rpart_roc, col = "blue")
+auc(rpart_roc)
+print(rpart.model)
+
+#C5.0 MODEL#
+
+grid <- expand.grid( .winnow = c(FALSE),
+                     .trials = c(50,100,150,200),
+                     .model = "tree")
+
+c5.0_model <- train(isFraud ~ .,
+                    data = train, method = "C5.0",
+                    trControl = control,
+                    metric = "ROC",
+                    tunegrid = grid,
+                    verbose = FALSE)
+
+c5.0_pred <- predict(c5.0_model, test)
+confusionMatrix(test$isFraud, c5.0_pred, positive = 'Yes')
+
+c5_pred_big_no <- predict(c5.0_model, big_no_sample)
+confusionMatrix(big_no_sample$isFraud, c5_pred_big_no)
+
+c5.O_probs <- predict(c5.0_model, test, type = "prob")
+c5.0_roc <- roc(response = test$isFraud,
+                predictor = c5.O_probs$Yes,
+                levels = levels(test$isFraud))
+
+plot(c5.0_roc, col = "red")
+auc(c5.0_roc)
